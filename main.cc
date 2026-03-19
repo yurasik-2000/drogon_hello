@@ -1,4 +1,6 @@
 #include <drogon/drogon.h>
+#include <fstream>
+#include <thread>
 
 using namespace drogon;
 using Callback = std::function<void(const HttpResponsePtr &)>;
@@ -6,7 +8,7 @@ using Callback = std::function<void(const HttpResponsePtr &)>;
 int main()
 {
     drogon::app().loadConfigFile("config.json");
-    
+
     app().registerHandler("/users",
         [](const HttpRequestPtr &req, Callback &&callback) {
             auto client = drogon::app().getDbClient("postgres");
@@ -156,6 +158,66 @@ int main()
                 id);
         },
         {Delete});
+
+    app().registerHandler("/slow/file",
+        [](const HttpRequestPtr &req, Callback &&callback) {
+            std::thread([callback]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+                std::ifstream file("config.json", std::ios::binary);
+                if (!file.is_open()) {
+                    Json::Value error;
+                    error["error"] = "Failed to open file";
+                    callback(HttpResponse::newHttpJsonResponse(error));
+                    return;
+                }
+
+                std::string content((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+                file.close();
+
+                Json::Value result;
+                result["source"] = "file: config.json";
+                result["size_bytes"] = static_cast<Json::UInt64>(content.length());
+                result["content"] = content;
+                callback(HttpResponse::newHttpJsonResponse(result));
+            }).detach();
+        },
+        {Get});
+
+    app().registerHandler("/slow/tcp",
+        [](const HttpRequestPtr &req, Callback &&callback) {
+	    static const std::string url("https://slashdot.org");
+            auto httpClient = HttpClient::newHttpClient(url);
+            auto request = HttpRequest::newHttpRequest();
+            request->setPath("/");
+
+            httpClient->sendRequest(request, [callback](ReqResult result, HttpResponsePtr response) {
+                if (result != ReqResult::Ok || !response) {
+                    Json::Value error;
+                    error["error"] = "Failed to fetch from example.com";
+                    callback(HttpResponse::newHttpJsonResponse(error));
+                    return;
+                }
+
+                Json::Value jsonResult;
+                jsonResult["source"] = url;
+                jsonResult["status_code"] = response->statusCode();
+                jsonResult["body_length"] = static_cast<Json::UInt64>(response->body().length());
+                jsonResult["body_preview"] = std::string(response->body().substr(0, 500));
+
+                auto headers = response->getHeaders();
+                for (const auto &h : headers) {
+                    if (h.first == "Content-Type") {
+                        jsonResult["content_type"] = h.second;
+                        break;
+                    }
+                }
+
+                callback(HttpResponse::newHttpJsonResponse(jsonResult));
+            });
+        },
+        {Get});
 
     app().run();
 }
